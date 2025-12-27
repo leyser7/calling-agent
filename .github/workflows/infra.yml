@@ -22,7 +22,7 @@ jobs:
         uses: aws-actions/aws-cloudformation-github-deploy@v1.3.0
         with:
           name: calling-agent
-          template: infra/template.yaml
+          template: infra/template.yml
           no-fail-on-empty-changeset: 1
           parameter-overrides: >-
             instanceType=${{ vars.INSTANCE_TYPE }},
