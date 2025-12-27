@@ -19,19 +19,11 @@ Real-time conversational agent application with natural voice interactions power
 ```mermaid
 graph LR
     A[Browser Client] -->|WebSocket/HTTPS| B[CloudFront CDN]
-    B -->|HTTP| C[EC2 Instance]
-    C -->|WebSocket| D[Node.js Server]
-    D -->|Audio Stream| E[Amazon Bedrock]
-    E -->|Nova 2 Sonic| F[AI Response]
-    F -->|Audio Stream| D
-    D -->|WebSocket| C
+    B -->|HTTP| C[EC2 Instance: Node.js Server]
+    C -->|Audio Stream| E[Amazon Bedrock: Nova 2 Sonic]
+    E -->|AI Response| C
     C -->|HTTP| B
     B -->|WebSocket/HTTPS| A
-    
-    style A fill:#61dafb
-    style E fill:#ff9900
-    style D fill:#68a063
-    style B fill:#8b4513
 ```
 
 ### Component Details
