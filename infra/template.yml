@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudfront with websocket ec2
+
+Parameters:
+  instanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.nano
+      - t3.micro
+      - t3.small
+      - t4g.micro
+    ConstraintDescription: Must be a valid EC2 instance type
+  
+  keyPairName:
+    Description: (Optional) EC2 Key Pair for SSH access. Leave empty if you don't need SSH access.
+    Type: String
+    Default: ""
+  
+  allowedSSHCIDR:
+    Description: CIDR block allowed to SSH (only used if KeyPairName is provided)
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$
+  
+  awsRegion:
+    Description: AWS Region for Bedrock
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-west-2
+      - eu-west-1
+      - ap-southeast-1
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref keyPairName, ""]]
+
+Resources:
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 WebSocket server (allows HTTP from anywhere for CloudFront)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: HTTP traffic from CloudFront
+        - !If
+          - HasKeyPair
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref allowedSSHCIDR
+            Description: SSH access
+          - !Ref AWS::NoValue
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock-runtime:InvokeModel
+                  - bedrock-runtime:InvokeModelWithResponseStream
+                  - bedrock-agent-runtime:InvokeAgent
+                Resource: "*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref instanceType
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      KeyName: !If [HasKeyPair, !Ref keyPairName, !Ref AWS::NoValue]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+          
+          echo "=== Starting EC2 initialization ==="
+          
+          yum update -y
+          
+          echo "Installing Node.js 20..."
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+          yum install -y nodejs git
+          
+          echo "Installing PM2..."
+          npm install -g pm2
+          
+          echo "Creating application directory..."
+          mkdir -p /opt/app
+          chown ec2-user:ec2-user /opt/app
+          
+          echo "Configuring PM2 startup..."
+          su - ec2-user -c "pm2 startup systemd -u ec2-user --hp /home/ec2-user"
+          
+          echo "=== EC2 initialization complete ==="
+          echo "Application will be accessible via CloudFront"
+          echo "Deploy your code to /opt/app and run: pm2 start dist/server.js"
+          echo "IMPORTANT: Make sure your app listens on port 3000"
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: EC2Instance
+    Properties:
+      DistributionConfig:
+        Comment: CloudFront distribution for webscoket
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        
+        Origins:
+          - Id: EC2Origin
+            DomainName: !GetAtt EC2Instance.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 3000
+              OriginProtocolPolicy: http-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+        
+        DefaultCacheBehavior:
+          TargetOriginId: EC2Origin
+          ViewerProtocolPolicy: redirect-to-https
+          
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          
+          
+          Compress: true
+        
+        PriceClass: PriceClass_100
+        
+        CustomErrorResponses:
+          - ErrorCode: 502
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 503
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 504
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  CloudFrontURL:
+    Description: CloudFront url to app access
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontURL
+  
+  CloudFrontDomain:
+    Description: CloudFront domain name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontDomain
+
+  EC2PublicIP:
+    Description: Public IP address of the EC2 instance (for SSH access only - DO NOT use for web access)
+    Value: !GetAtt EC2Instance.PublicIp
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2PublicIP
+  
+  EC2PublicDNS:
+    Description: Public DNS name of the EC2 instance
+    Value: !GetAtt EC2Instance.PublicDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2PublicDNS
+  
+  SSHCommand:
+    Description: SSH command to connect to the EC2 instance
+    Value: !If
+      - HasKeyPair
+      - !Sub ssh -i ~/.ssh/${keyPairName}.pem ec2-user@${EC2Instance.PublicIp}
+      - No SSH access - keyPairName not provided
