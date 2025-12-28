@@ -83,7 +83,6 @@ sudo tar -xzf /tmp/voice-ai-app.tar.gz
 sudo chown -R ec2-user:ec2-user /opt/app
 
 # Install production dependencies
-cd /opt/app
 npm install --omit=dev
 
 # Verify files are in place
